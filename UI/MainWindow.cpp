@@ -1,3 +1,20 @@
+/** 
+ * Copyright 2011 Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License. You may obtain
+ * a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */ 
+
+
 #include "MainWindow.h"
 
 MainWindow::MainWindow(QWidget *parent) :
@@ -11,13 +28,14 @@ MainWindow::MainWindow(QWidget *parent) :
 
     // Logic + connections.
     this->initLogic();
-    this->connectLogic();
     this->initUI();
+    this->connectLogic();
     this->connectUI();
     this->assignLogicToThreads();
 }
 
 MainWindow::~MainWindow() {
+    delete this->config;
     delete this->parser;
     delete this->analyst;
 }
@@ -34,6 +52,9 @@ void MainWindow::updateParsingStatus(bool parsing) {
     this->parsing = parsing;
     this->updateStatus();
     this->menuFileImport->setEnabled(!parsing);
+    this->menuFileLoadConfig->setEnabled(!parsing);
+    this->menuFileLoad->setEnabled(!parsing);
+    this->menuFileSave->setEnabled(!parsing);
     if (!parsing)
         this->mineOrCompare();
 }
@@ -42,25 +63,22 @@ void MainWindow::updateParsingDuration(int duration) {
     QMutexLocker(&this->statusMutex);
     this->totalParsingDuration += duration;
     this->status_performance_parsing->setText(
-                QString("%1 s (%2 page views/s)")
+                QString("%1 s (%2 samples/s)")
                 .arg(QString::number(this->totalParsingDuration / 1000.0, 'f', 2))
                 .arg(QString::number(this->totalPageViews / (this->totalParsingDuration / 1000.0), 'f', 0))
     );
 }
 
-void MainWindow::updateAnalyzingDuration(int duration) {
-    QMutexLocker(&this->statusMutex);
-    this->totalAnalyzingDuration += duration;
-    this->status_performance_analyzing->setText(
-                QString("%1 s (%2 episodes/s)")
-                .arg(QString::number(this->totalAnalyzingDuration / 1000.0, 'f', 2))
-                .arg(QString::number(this->totalTransactions / (this->totalAnalyzingDuration / 1000.0), 'f', 0))
-    );
-}
+void MainWindow::updateRuleMiningStats(int duration, Time start, Time end, quint64 numAssociationRules, quint64 numTransactions, quint64 numLines) {
+    Q_UNUSED(start)
+    Q_UNUSED(end)
+    Q_UNUSED(numAssociationRules)
+    Q_UNUSED(numTransactions)
+    Q_UNUSED(numLines)
 
-void MainWindow::updateMiningDuration(int duration) {
     QMutexLocker(&this->statusMutex);
     this->totalMiningDuration += duration;
+    this->totalPatternsExaminedWhileMining += this->patternTreeSize;
     this->status_performance_mining->setText(
                 QString("%1 s (%2 patterns/s)")
                 .arg(QString::number(this->totalMiningDuration / 1000.0, 'f', 2))
@@ -68,11 +86,16 @@ void MainWindow::updateMiningDuration(int duration) {
     );
 }
 
-void MainWindow::updateAnalyzingStatus(bool analyzing, Time start, Time end, int numPageViews, int numTransactions) {
+void MainWindow::updateAnalyzingStatus(bool analyzing, Time start, Time end, quint64 numPageViews, quint64 numTransactions) {
+    this->menuFileImport->setEnabled(!analyzing);
+    this->menuFileLoadConfig->setEnabled(!analyzing);
+    this->menuFileLoad->setEnabled(!analyzing);
+    this->menuFileSave->setEnabled(!analyzing);
+
     // Analysis started.
     if (analyzing) {
         this->updateStatus(
-                    tr("Processing %1 page views (%2 transactions) between %3 and %4")
+                    tr("Processing %1 samples (%2 transactions) between %3 and %4")
                     .arg(numPageViews)
                     .arg(numTransactions)
                     .arg(QDateTime::fromTime_t(start).toString("yyyy-MM-dd hh:mm:ss"))
@@ -84,17 +107,23 @@ void MainWindow::updateAnalyzingStatus(bool analyzing, Time start, Time end, int
         this->updateStatus();
 }
 
-void MainWindow::updateMiningStatus(bool mining) {
+void MainWindow::updateRuleMiningStatus(bool mining) {
+    this->menuFileImport->setEnabled(!mining);
+    this->menuFileLoadConfig->setEnabled(!mining);
+    this->menuFileLoad->setEnabled(!mining);
+    this->menuFileSave->setEnabled(!mining);
+
     if (mining)
         this->updateStatus("Mining association rules");
     else
         this->updateStatus();
 }
 
-void MainWindow::updateAnalyzingStats(Time start, Time end, int pageViews, int transactions, int uniqueItems, int frequentItems, int patternTreeSize) {
+void MainWindow::updateAnalyzingStats(int duration, Time start, Time end, quint64 pageViews, quint64 transactions, quint64 uniqueItems, quint64 frequentItems, quint64 patternTreeSize) {
     this->statusMutex.lock();
     this->totalPageViews = pageViews;
     this->totalTransactions = transactions;
+    this->totalAnalyzingDuration += duration;
     this->patternTreeSize = patternTreeSize;
     this->startTime = start;
     this->endTime = end;
@@ -121,23 +150,36 @@ void MainWindow::updateAnalyzingStats(Time start, Time end, int pageViews, int t
                 .arg(QString::number(patternTreeSize))
                 .arg(QString::number(((12 + (patternTreeSize * (STATS_TILTED_TIME_WINDOW_BYTES + STATS_FPNODE_ESTIMATED_CHILDREN_AVG_BYTES))) / 1000.0 / 1000.0), 'f', 2))
     );
+
+    this->status_performance_analyzing->setText(
+                QString("%1 s (%2 transactions/s)")
+                .arg(QString::number(this->totalAnalyzingDuration / 1000.0, 'f', 2))
+                .arg(QString::number(this->totalTransactions / (this->totalAnalyzingDuration / 1000.0), 'f', 0))
+    );
 }
 
-void MainWindow::minedRules(uint from, uint to, QList<Analytics::AssociationRule> associationRules, Analytics::SupportCount eventsInTimeRange) {
-    Time latestAnalyzedTime = this->endTime - (this->endTime % 900) + 900;
-    Time endTime = latestAnalyzedTime - (Analytics::TiltedTimeWindow::quarterDistanceToBucket(from, false) * 900);
-    Time startTime = latestAnalyzedTime - (Analytics::TiltedTimeWindow::quarterDistanceToBucket(to, true) * 900);
-    if (startTime < this->startTime)
-        startTime = this->startTime;
+void MainWindow::minedRules(uint from, uint to,
+                            uint startTime, uint endTime,
+                            QList<Analytics::AssociationRule> associationRules,
+                            Analytics::SupportCount eventsInTimeRange)
+{
+    Q_UNUSED(startTime)
+    Q_UNUSED(endTime)
+
+    // Confusing here, `toTime` uses `from`, `fromTime` uses `to`. It has a good
+    // reason though: the `from` bucket refers to the first bucket in memory,
+    // but it contains the most recent data, hence `toTime`.
+    Time lastTime = this->ttwDef->timeOfNextBucket(this->endTime);
+    Time toTime   = lastTime - this->ttwDef->secondsToBucket(from, false);
+    Time fromTime = lastTime - this->ttwDef->secondsToBucket(to, true);
 
     this->statusMutex.lock();
-    this->totalPatternsExaminedWhileMining += this->patternTreeSize;
     this->causesDescription->setText(
-                QString(tr("%1 causes mined from %2 page views (from %3 until %4)"))
+                QString(tr("%1 rules mined from %2 samples (from %3 until %4)"))
                 .arg(associationRules.size())
                 .arg(eventsInTimeRange)
-                .arg(QDateTime::fromTime_t(startTime).toString("yyyy-MM-dd hh:mm:ss"))
-                .arg(QDateTime::fromTime_t(endTime).toString("yyyy-MM-dd hh:mm:ss"))
+                .arg(QDateTime::fromTime_t(fromTime).toString("yyyy-MM-dd hh:mm:ss"))
+                .arg(QDateTime::fromTime_t(toTime).toString("yyyy-MM-dd hh:mm:ss"))
     );
     this->statusMutex.unlock();
 
@@ -148,10 +190,10 @@ void MainWindow::minedRules(uint from, uint to, QList<Analytics::AssociationRule
     QStandardItemModel * model = new QStandardItemModel(associationRules.size(), 4, this);
 
     QStringList headerLabels;
-    headerLabels << tr("Episode") << tr("Circumstances") << tr("% slow") << tr("# slow");
+    headerLabels << tr("Episode") << tr("Circumstances") << tr("Consequence") << tr("Confidence") << tr("Frequency");
     model->setHorizontalHeaderLabels(headerLabels);
 
-    int row = 0;
+    uint row = 0;
     QPair<Analytics::ItemName, Analytics::ItemNameList> antecedent;
     foreach (Analytics::AssociationRule rule, associationRules) {
         antecedent = this->analyst->extractEpisodeFromItemset(rule.antecedent);
@@ -165,9 +207,14 @@ void MainWindow::minedRules(uint from, uint to, QList<Analytics::AssociationRule
         circumstancesItem->setData(circumstances, Qt::UserRole);
         model->setItem(row, 1, circumstancesItem);
 
+        QString consequents = ((QStringList) this->analyst->itemsetIDsToNames(rule.consequent)).join(", ");
+        QStandardItem * consequentItem = new QStandardItem(consequents);
+        consequentItem->setData(consequents, Qt::UserRole);
+        model->setItem(row, 2, consequentItem);
+
         QStandardItem * confidenceItem = new QStandardItem(QString("%1%").arg(QString::number(rule.confidence * 100, 'f', 2)));
         confidenceItem->setData(rule.confidence, Qt::UserRole);
-        model->setItem(row, 2, confidenceItem);
+        model->setItem(row, 3, confidenceItem);
 
         double relOccurrences = rule.support * 100.0 / eventsInTimeRange;
         QStandardItem * occurrencesItem = new QStandardItem(
@@ -176,7 +223,7 @@ void MainWindow::minedRules(uint from, uint to, QList<Analytics::AssociationRule
                     .arg(QString::number(relOccurrences, 'f', 2))
         );
         occurrencesItem->setData(rule.support, Qt::UserRole);
-        model->setItem(row, 3, occurrencesItem);
+        model->setItem(row, 4, occurrencesItem);
 
         row++;
     }
@@ -194,6 +241,7 @@ void MainWindow::comparedMinedRules(uint fromOlder, uint toOlder,
                         QList<Analytics::AssociationRule> comparedRules,
                         QList<Analytics::Confidence> confidenceVariance,
                         QList<float> supportVariance,
+                        QList<float> relativeSupport,
                         Analytics::SupportCount eventsInIntersectedTimeRange,
                         Analytics::SupportCount eventsInOlderTimeRange,
                         Analytics::SupportCount eventsInNewerTimeRange)
@@ -213,11 +261,14 @@ void MainWindow::comparedMinedRules(uint fromOlder, uint toOlder,
     Q_UNUSED(toOlder)
     Q_UNUSED(fromNewer)
     Q_UNUSED(toNewer)
+    Q_UNUSED(eventsInIntersectedTimeRange)
+    Q_UNUSED(eventsInOlderTimeRange)
+    Q_UNUSED(eventsInNewerTimeRange)
 
     this->statusMutex.lock();
     this->totalPatternsExaminedWhileMining += this->patternTreeSize * 2;
     this->causesDescription->setText(
-                QString(tr("Mined %1 and %2 causes, of which %3 occurred in both time granularities, thus totalling %4 unique causes"))
+                QString(tr("Mined %1 and %2 rules, of which %3 occurred in both time granularities, thus totalling %4 unique rules"))
                 .arg(olderRules.size())
                 .arg(newerRules.size())
                 .arg(intersectedRules.size())
@@ -232,10 +283,10 @@ void MainWindow::comparedMinedRules(uint fromOlder, uint toOlder,
     QStandardItemModel * model = new QStandardItemModel(comparedRules.size(), 6, this);
 
     QStringList headerLabels;
-    headerLabels << tr("Episode") << tr("Circumstances") << tr("% slow") << tr("% slow change") << tr("# slow") << tr("# slow change");
+    headerLabels << tr("Episode") << tr("Circumstances") << tr("%") << tr("% change") << tr("#") << tr("# change");
     model->setHorizontalHeaderLabels(headerLabels);
 
-    int row = 0;
+    uint row = 0;
     QPair<Analytics::ItemName, Analytics::ItemNameList> antecedent;
     for (int i = 0; i < comparedRules.size(); i++) {
         Analytics::AssociationRule rule = comparedRules.at(i);
@@ -257,21 +308,13 @@ void MainWindow::comparedMinedRules(uint fromOlder, uint toOlder,
 
         QChar plusOrEmpty = (confidenceVariance[i] > 0) ? QChar('+') : QChar(QChar::Null);
         QStandardItem * confidenceVarianceItem = new QStandardItem(QString("%1%2%").arg(plusOrEmpty).arg(QString::number(confidenceVariance[i] * 100, 'f', 2)));
-        confidenceItem->setData(confidenceVariance[i], Qt::UserRole);
+        confidenceVarianceItem->setData(confidenceVariance[i], Qt::UserRole);
         model->setItem(row, 3, confidenceVarianceItem);
 
-        Analytics::SupportCount eventCount;
-        if (supportVariance[i] == -1) // This only existed in the "older" time range.
-            eventCount = eventsInOlderTimeRange;
-        else if (supportVariance[i] == 1) // This only existed in the "newer" time range.
-            eventCount = eventsInNewerTimeRange;
-        else // This existed in both time ranges.
-            eventCount = eventsInIntersectedTimeRange;
-        double relOccurrences = rule.support * 100.0 / eventCount;
         QStandardItem * occurrencesItem = new QStandardItem(
                     QString("%1 (%2%)")
                     .arg(QString::number(rule.support))
-                    .arg(QString::number(relOccurrences, 'f', 2))
+                    .arg(QString::number(relativeSupport[i], 'f', 2))
         );
         occurrencesItem->setData(rule.support, Qt::UserRole);
         model->setItem(row, 4, occurrencesItem);
@@ -311,28 +354,105 @@ void MainWindow::causesFilterChanged(QString filterString) {
     this->causesTableProxyModel->invalidate();
 
     QString episodeFilter = QString::null;
-    QStringList circumstancesFilter;
+    QStringList nonEpisodeFilter;
     foreach (QString f, filterString.split(",", QString::SkipEmptyParts)) {
         f = f.trimmed();
         if (f.startsWith("episode:"))
             episodeFilter = f.section(':', 1);
         else
-            circumstancesFilter.append(f);
+            nonEpisodeFilter.append(f);
     }
 
     this->causesTableProxyModel->setEpisodeFilter(episodeFilter);
-    this->causesTableProxyModel->setCircumstancesFilter(circumstancesFilter);
+
+    // Apply the non-episode filter to both other columns.
+    this->causesTableProxyModel->setCircumstancesFilter(nonEpisodeFilter);
+    this->causesTableProxyModel->setConsequentsFilter(nonEpisodeFilter);
 }
 
 void MainWindow::importFile() {
     QSettings settings;
     QString lastDirectory = settings.value("UI/lastImportDirectory", QDesktopServices::storageLocation(QDesktopServices::DesktopLocation)).toString();
 
-    QString logFile = QFileDialog::getOpenFileName(this, tr("Open Episodes log file"), lastDirectory, tr("Episodes log files (*.log)"), NULL, QFileDialog::ReadOnly);
+    QString logFile = QFileDialog::getOpenFileName(this, tr("Import JSON log dump file"), lastDirectory, tr("JSON log dump (*.json)"), NULL, QFileDialog::ReadOnly);
 
     if (!logFile.isEmpty()) {
         settings.setValue("UI/lastImportDirectory", QFileInfo(logFile).path());
         emit parse(logFile);
+    }
+}
+
+void MainWindow::applyConfigToAnalyst() {
+    this->analyst->setParameters(
+                this->config->getMinPatternSupport(),
+                this->config->getMinPotentialPatternSupport(),
+                this->config->getMinRuleConfidence()
+    );
+    this->analyst->resetConstraints();
+    // Set pattern & rule consequent constraints. This defines which
+    // associations will be found by the Analyst.
+    Analytics::ItemConstraintType constraintType;
+    Analytics::ItemConstraintsHash frequentItemsetItemConstraints,
+                                   ruleAntecedentItemConstraints,
+                                   ruleConsequentItemConstraints;
+    frequentItemsetItemConstraints = this->config->getPatternItemConstraints();
+    for (int i = Analytics::ItemConstraintPositive; i <= Analytics::ItemConstraintNegative; i++) {
+        constraintType = (Analytics::ItemConstraintType) i;
+        foreach (const QSet<Analytics::ItemName> & items, frequentItemsetItemConstraints[constraintType])
+            this->analyst->addFrequentItemsetItemConstraint(items, constraintType);
+    }
+    ruleAntecedentItemConstraints = this->config->getRuleAntecedentItemConstraints();
+    for (int i = Analytics::ItemConstraintPositive; i <= Analytics::ItemConstraintNegative; i++) {
+        constraintType = (Analytics::ItemConstraintType) i;
+        foreach (const QSet<Analytics::ItemName> & items, ruleAntecedentItemConstraints[constraintType])
+            this->analyst->addRuleAntecedentItemConstraint(items, constraintType);
+    }
+    ruleConsequentItemConstraints = this->config->getRuleConsequentItemConstraints();
+    for (int i = Analytics::ItemConstraintPositive; i <= Analytics::ItemConstraintNegative; i++) {
+        constraintType = (Analytics::ItemConstraintType) i;
+        foreach (const QSet<Analytics::ItemName> & items, ruleConsequentItemConstraints[constraintType])
+            this->analyst->addRuleConsequentItemConstraint(items, constraintType);
+    }
+}
+
+void MainWindow::loadConfigFile() {
+    QSettings settings;
+    QString lastDirectory = settings.value("UI/lastConfigDirectory", QDesktopServices::storageLocation(QDesktopServices::DesktopLocation)).toString();
+
+    QString configFile = QFileDialog::getOpenFileName(this, tr("Load PatternMiner config file"), lastDirectory);
+
+    if (!configFile.isEmpty()) {
+        settings.setValue("UI/lastConfigDirectory", QFileInfo(configFile).path());
+        if (!this->config->parse(configFile))
+            qCritical("Failed to parse the config file '%s'.", qPrintable(configFile));
+
+        this->applyConfigToAnalyst();
+    }
+}
+
+void MainWindow::loadFile() {
+    // TODO: delete parser & analyst, init & connect new ones.
+    QSettings settings;
+    QString lastDirectory = settings.value("UI/lastLoadSaveDirectory", QDesktopServices::storageLocation(QDesktopServices::DesktopLocation)).toString();
+
+    QString patternFinderFile = QFileDialog::getOpenFileName(this, tr("Load PatternMiner file"), lastDirectory);
+
+    if (!patternFinderFile.isEmpty()) {
+        settings.setValue("UI/lastLoadSaveDirectory", QFileInfo(patternFinderFile).path());
+        this->conceptHierarchyModel->reset();
+        emit load(patternFinderFile);
+    }
+}
+
+void MainWindow::saveFile() {
+    QSettings settings;
+    QString lastDirectory = settings.value("UI/lastLoadSaveDirectory", QDesktopServices::storageLocation(QDesktopServices::DesktopLocation)).toString();
+
+    QString patternFinderFile = QFileDialog::getSaveFileName(this, tr("Save PatternMiner state file"), lastDirectory, tr("PatternMiner state file"));
+
+    if (!patternFinderFile.isEmpty()) {
+        settings.setValue("UI/lastLoadSaveDirectory", QFileInfo(patternFinderFile).path());
+        emit save(patternFinderFile);
     }
 }
 
@@ -343,70 +463,130 @@ void MainWindow::settingsDialog() {
     settingsDialog->activateWindow();
 }
 
+void MainWindow::loadedFile(bool success, Time start, Time end, quint64 pageViews, quint64 transactions, quint64 uniqueItems, quint64 frequentItems, quint64 patternTreeSize) {
+    if (!success) {
+        QMessageBox messageBox;
+        messageBox.setText("Loading state");
+        messageBox.setInformativeText("The state could not be loaded.");
+        messageBox.setIcon(QMessageBox::Warning);
+        messageBox.setStandardButtons(QMessageBox::Ok);
+        messageBox.setDefaultButton(QMessageBox::Ok);
+        messageBox.exec();
+    }
+    else {
+        // Update the TTWDefinition because it may have changed.
+        *this->ttwDef = this->analyst->getTTWDefinition();
+
+        this->updateAnalyzingStats(0, start, end, pageViews, transactions, uniqueItems, frequentItems, patternTreeSize);
+
+        this->mineOrCompare();
+    }
+}
+
+void MainWindow::savedFile(bool success) {
+    if (!success) {
+        QMessageBox messageBox;
+        messageBox.setText("Saving calculations");
+        messageBox.setInformativeText("The state could not be saved.");
+        messageBox.setIcon(QMessageBox::Warning);
+        messageBox.setStandardButtons(QMessageBox::Ok);
+        messageBox.setDefaultButton(QMessageBox::Ok);
+        messageBox.exec();
+    }
+}
+
 
 //------------------------------------------------------------------------------
 // Private methods: logic.
 
 void MainWindow::initLogic() {
-    qRegisterMetaType< QList<QStringList> >("QList<QStringList>");
-    qRegisterMetaType< QList<float> >("QList<float>");
-    qRegisterMetaType<Time>("Time");
+    registerCommonMetaTypes();
+    Config::registerMetaTypes();
     Analytics::registerBasicMetaTypes();
 
     QSettings settings;
-    QString basePath = QCoreApplication::applicationDirPath();
-    QString defaultValue = basePath + "/config/EpisodesSpeeds.csv";
-    QString episodeDiscretizerCSV = settings.value("parser/episodeDiscretizerCSVFile", defaultValue).toString();
+    QString configFile = settings.value("configFile").toString();
 
-    EpisodesParser::Parser::initParserHelpers(basePath + "/config/browscap.csv",
-                                              basePath + "/config/browscap-index.db",
-                                              basePath + "/config/GeoIPCity.dat",
-                                              basePath + "/config/GeoIPASNum.dat",
-                                              episodeDiscretizerCSV
-                                              );
+    // For now: hardcoded TiltedTimeWindow definition: 24 hours, 30 days.
+    QMap<char, uint> granularities;
+    granularities.insert('H', 24);
+    granularities.insert('D', 30);
+    this->ttwDef = new Analytics::TTWDefinition(3600,
+                                                granularities,
+                                                QList<char>() << 'H' << 'D');
 
-    // Instantiate the EpisodesParser and the Analytics. Then connect them.
-    this->parser = new EpisodesParser::Parser();
+    // Instantiate config.
+    // TRICKY: this is just an empty shell, you still need to call its parse()
+    // method with a valid config file!
+    this->config = new Config::Config();
 
+    // Instantiate the Parser.
+    this->parser = new JSONLogParser::Parser(*this->config,
+                                             this->ttwDef->getSecPerWindow());
+
+    // Instantiate the Analyst.
     double minSupport = settings.value("analyst/minimumSupport", 0.05).toDouble();
     double minPatternTreeSupport = settings.value("analyst/minimumPatternTreeSupport", 0.04).toDouble();
     double minConfidence = settings.value("analyst/minimumConfidence", 0.2).toDouble();
-    this->analyst = new Analytics::Analyst(minSupport, minPatternTreeSupport, minConfidence);
+    this->analyst = new Analytics::Analyst(*this->ttwDef, minSupport, minPatternTreeSupport, minConfidence);
 
-    // Set constraints. This defines which associations will be found. By
-    // default, only causes for slow episodes will be searched.
-    this->analyst->addFrequentItemsetItemConstraint("episode:*", Analytics::CONSTRAINT_POSITIVE_MATCH_ANY);
-    this->analyst->addRuleConsequentItemConstraint("duration:slow", Analytics::CONSTRAINT_POSITIVE_MATCH_ANY);
-    //analyst->addRuleConsequentItemConstraint("duration:acceptable", Analytics::CONSTRAINT_POSITIVE_MATCH_ANY);
-    //analyst->addRuleConsequentItemConstraint("duration:fast", Analytics::CONSTRAINT_POSITIVE_MATCH_ANY);
+    // Set pattern & rule consequent constraints. This defines which
+    // associations will be found by the Analyst.
+    Analytics::ItemConstraintType constraintType;
+    Analytics::ItemConstraintsHash frequentItemsetItemConstraints,
+                                   ruleAntecedentItemConstraints,
+                                   ruleConsequentItemConstraints;
+    frequentItemsetItemConstraints = this->config->getPatternItemConstraints();
+    for (int i = Analytics::ItemConstraintPositive; i <= Analytics::ItemConstraintNegative; i++) {
+        constraintType = (Analytics::ItemConstraintType) i;
+        foreach (const QSet<Analytics::ItemName> & items, frequentItemsetItemConstraints[constraintType])
+            this->analyst->addFrequentItemsetItemConstraint(items, constraintType);
+    }
+    ruleAntecedentItemConstraints = this->config->getRuleAntecedentItemConstraints();
+    for (int i = Analytics::ItemConstraintPositive; i <= Analytics::ItemConstraintNegative; i++) {
+        constraintType = (Analytics::ItemConstraintType) i;
+        foreach (const QSet<Analytics::ItemName> & items, ruleAntecedentItemConstraints[constraintType])
+            this->analyst->addRuleAntecedentItemConstraint(items, constraintType);
+    }
+    ruleConsequentItemConstraints = this->config->getRuleConsequentItemConstraints();
+    for (int i = Analytics::ItemConstraintPositive; i <= Analytics::ItemConstraintNegative; i++) {
+        constraintType = (Analytics::ItemConstraintType) i;
+        foreach (const QSet<Analytics::ItemName> & items, ruleConsequentItemConstraints[constraintType])
+            this->analyst->addRuleConsequentItemConstraint(items, constraintType);
+    }
 }
 
 void MainWindow::connectLogic() {
     // Pure logic.
-    connect(this->parser, SIGNAL(parsedBatch(QList<QStringList>, double, Time, Time)), this->analyst, SLOT(analyzeTransactions(QList<QStringList>, double, Time, Time)));
+    connect(this->parser, SIGNAL(parsedChunkOfBatch(Batch<RawTransaction>)), this->analyst, SLOT(analyzeChunkOfBatch(Batch<RawTransaction>)));
 
     // Logic -> main thread -> logic (wake up sleeping threads).
-    connect(this->analyst, SIGNAL(processedBatch()), SLOT(wakeParser()));
+    connect(this->analyst, SIGNAL(processedChunkOfBatch(bool)), SLOT(wakeParser()));
 
     // Logic -> UI.
     connect(this->parser, SIGNAL(parsing(bool)), SLOT(updateParsingStatus(bool)));
-    connect(this->parser, SIGNAL(parsedDuration(int)), SLOT(updateParsingDuration(int)));
-    connect(this->analyst, SIGNAL(analyzing(bool,Time,Time,int,int)), SLOT(updateAnalyzingStatus(bool,Time,Time,int,int)));
-    connect(this->analyst, SIGNAL(analyzedDuration(int)), SLOT(updateAnalyzingDuration(int)));
-    connect(this->analyst, SIGNAL(mining(bool)), SLOT(updateMiningStatus(bool)));
-    connect(this->analyst, SIGNAL(minedDuration(int)), SLOT(updateMiningDuration(int)));
-    connect(this->analyst, SIGNAL(stats(Time,Time,int,int,int,int,int)), SLOT(updateAnalyzingStats(Time,Time,int,int,int,int,int)));
+    connect(this->parser, SIGNAL(stats(int,BatchMetadata)), SLOT(updateParsingDuration(int)));
+    connect(this->analyst, SIGNAL(analyzing(bool,Time,Time,quint64,quint64)), SLOT(updateAnalyzingStatus(bool,Time,Time,quint64,quint64)));
+//    connect(this->analyst, SIGNAL(analyzedDuration(int)), SLOT(updateAnalyzingDuration(int)));
+    connect(this->analyst, SIGNAL(stats(int,Time,Time,quint64,quint64,quint64,quint64,quint64)), SLOT(updateAnalyzingStats(int,Time,Time,quint64,quint64,quint64,quint64,quint64)));
+    connect(this->analyst, SIGNAL(mining(bool)), SLOT(updateRuleMiningStatus(bool)));
+    connect(this->analyst, SIGNAL(ruleMiningStats(int,Time,Time,quint64,quint64,quint64)), SLOT(updateRuleMiningStats(int,Time,Time,quint64,quint64,quint64)));
     connect(this->analyst, SIGNAL(minedRules(uint,uint,QList<Analytics::AssociationRule>,Analytics::SupportCount)), SLOT(minedRules(uint,uint,QList<Analytics::AssociationRule>,Analytics::SupportCount)));
     connect(
                 this->analyst,
-                SIGNAL(comparedMinedRules(uint,uint,uint,uint,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::Confidence>,QList<float>,Analytics::SupportCount,Analytics::SupportCount,Analytics::SupportCount)),
-                SLOT(comparedMinedRules(uint,uint,uint,uint,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::Confidence>,QList<float>,Analytics::SupportCount,Analytics::SupportCount,Analytics::SupportCount))
+                SIGNAL(comparedMinedRules(uint,uint,uint,uint,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::Confidence>,QList<float>,QList<float>,Analytics::SupportCount,Analytics::SupportCount,Analytics::SupportCount)),
+                SLOT(comparedMinedRules(uint,uint,uint,uint,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::AssociationRule>,QList<Analytics::Confidence>,QList<float>,QList<float>,Analytics::SupportCount,Analytics::SupportCount,Analytics::SupportCount))
     );
+    connect(this->analyst, SIGNAL(loaded(bool,Time,Time,quint64,quint64,quint64,quint64,quint64)), this, SLOT(loadedFile(bool,Time,Time,quint64,quint64,quint64,quint64,quint64)));
+    connect(this->analyst, SIGNAL(saved(bool)), this, SLOT(savedFile(bool)));
+    connect(this->analyst, SIGNAL(newItemsEncountered(Analytics::ItemIDNameHash)), this->conceptHierarchyModel, SLOT(update(Analytics::ItemIDNameHash)));
 
     // UI -> logic.
     connect(this, SIGNAL(parse(QString)), this->parser, SLOT(parse(QString)));
     connect(this, SIGNAL(mine(uint,uint)), this->analyst, SLOT(mineRules(uint,uint)));
     connect(this, SIGNAL(mineAndCompare(uint,uint,uint,uint)), this->analyst, SLOT(mineAndCompareRules(uint,uint,uint,uint)));
+    connect(this, SIGNAL(load(QString)), this->analyst, SLOT(load(QString)));
+    connect(this, SIGNAL(save(QString)), this->analyst, SLOT(save(QString)));
 }
 
 void MainWindow::assignLogicToThreads() {
@@ -445,6 +625,8 @@ void MainWindow::updateCausesComparisonAbility(bool able) {
 }
 
 void MainWindow::mineOrCompare() {
+    this->config->reload();
+    this->applyConfigToAnalyst();
     if (this->causesActionChoice->currentIndex() == 0) {
         QPair<uint, uint> buckets = MainWindow::mapTimerangeChoiceToBucket(this->causesMineTimerangeChoice->currentIndex());
         emit mine(buckets.first, buckets.second);
@@ -463,27 +645,21 @@ QPair<uint, uint> MainWindow::mapTimerangeChoiceToBucket(int choice) {
     uint from, to;
 
     switch (choice) {
-    case 0: // last quarter
-        from = to = 0;
+    case 0: // last hour
+        from = 0; to = 3;
         break;
-    case 1: // last hour
-        from = to = 4;
+    case 1: // last 24 hours
+        from = 0; to = 23;
         break;
-    case 2: // last day
-        from = to = 28;
+    case 2: // last week
+        from = 0; to = 29;
         break;
-    case 3: // last week
-        from = 28; to = 34;
+    case 3: // last 2 weeks
+        from = 0; to = 36;
         break;
-    case 4: // last month
-        from = to = 59;
-        break;
-    case 5: // last year
-        from = to = 71;
-        break;
-    case 6:
+    case 4:
     default: // entire data set
-        from = 0; to = 71;
+        from = 0; to = 53;
         break;
     }
 
@@ -590,7 +766,7 @@ void MainWindow::createStatsGroupbox() {
 }
 
 void MainWindow::createCausesGroupbox() {
-    this->causesGroupbox = new QGroupBox(tr("Causes"));
+    this->causesGroupbox = new QGroupBox(tr("Circumstances"));
     QVBoxLayout * layout = new QVBoxLayout();
     QHBoxLayout * mineLayout = new QHBoxLayout();
     QHBoxLayout * filterLayout = new QHBoxLayout();
@@ -605,6 +781,7 @@ void MainWindow::createCausesGroupbox() {
     this->causesTableProxyModel->setFilterRole(Qt::DisplayRole);
     this->causesTableProxyModel->setEpisodesColumn(0);
     this->causesTableProxyModel->setCircumstancesColumn(1);
+    this->causesTableProxyModel->setConsequentsColumn(2);
     this->causesTable->setModel(this->causesTableProxyModel);
     this->causesTable->setSortingEnabled(true);
     this->causesTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -612,35 +789,38 @@ void MainWindow::createCausesGroupbox() {
     layout->addLayout(filterLayout);
 
     // Add children to "mine" layout.
-    QStringList timeRanges = QStringList() << "last quarter"
-                                           << "last hour"
-                                           << "last day"
+    QStringList timeRanges = QStringList() << "last hour"
+                                           << "last 24 hours"
                                            << "last week"
-                                           << "last month"
-                                           << "last year"
-                                           << "entire data set";
+                                           << "last 2 weeks"
+                                           << "entire data set (24 hours + 30 days)";
     this->causesActionChoice = new QComboBox(this);
     this->causesActionChoice->addItem(tr("Mine"));
     this->causesActionChoice->addItem(tr("Compare"));
-    QLabel * cm1 = new QLabel(tr("causes in the"));
+    QLabel * cm1 = new QLabel(tr("rules in the"));
     this->causesMineTimerangeChoice = new QComboBox(this);
     this->causesMineTimerangeChoice->addItems(timeRanges);
     this->causesCompareLabel = new QLabel(tr("with those in the"));
     this->causesCompareTimerangeChoice = new QComboBox(this);
     this->causesCompareTimerangeChoice->addItems(timeRanges);
+    this->causesCompareTimerangeChoice->setCurrentIndex(this->causesCompareTimerangeChoice->count() - 1);
+    this->causesReloadButton = new QPushButton(tr("Reload"), this);
+    this->causesReloadButton->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_R));
     mineLayout->addWidget(this->causesActionChoice);
     mineLayout->addWidget(cm1);
     mineLayout->addWidget(this->causesMineTimerangeChoice);
     mineLayout->addWidget(this->causesCompareLabel);
     mineLayout->addWidget(this->causesCompareTimerangeChoice);
     mineLayout->addStretch();
+    mineLayout->addWidget(this->causesReloadButton);
     this->updateCausesComparisonAbility(false);
 
     // Add children to "filter" layout.
     QLabel * filterLabel = new QLabel(tr("Filter") + ":");
+    this->conceptHierarchyModel = new ConceptHierarchyModel();
     this->causesFilterCompleter = new ConceptHierarchyCompleter();
     this->causesFilterCompleter->setCaseSensitivity(Qt::CaseInsensitive);
-    this->causesFilterCompleter->setModel(this->analyst->getConceptHierarchyModel());
+    this->causesFilterCompleter->setModel(this->conceptHierarchyModel);
     this->causesFilterCompleter->setModelSorting(QCompleter::CaseInsensitivelySortedModel);
     this->causesFilter = new QLineEdit();
     this->causesFilter->setCompleter(this->causesFilterCompleter);
@@ -648,7 +828,7 @@ void MainWindow::createCausesGroupbox() {
     filterLayout->addWidget(this->causesFilter);
 
     // Add children to "description" layout.
-    this->causesDescription = new QLabel(tr("No causes have been mined yet."));
+    this->causesDescription = new QLabel(tr("No rules have been mined yet."));
     descriptionLayout->addWidget(this->causesDescription);
     descriptionLayout->addStretch();
 
@@ -681,9 +861,9 @@ void MainWindow::createStatusGroupbox() {
     this->status_measurements_startDate = new QLabel(tr("N/A yet"));
     QLabel * me2 = new QLabel(tr("End date:"));
     this->status_measurements_endDate = new QLabel(tr("N/A yet"));
-    QLabel * me3 = new QLabel(tr("Page views:"));
+    QLabel * me3 = new QLabel(tr("Samples:"));
     this->status_measurements_pageViews = new QLabel("0");
-    QLabel * me4 = new QLabel(tr("Episodes:"));
+    QLabel * me4 = new QLabel(tr("Transactions:"));
     this->status_measurements_episodes = new QLabel("0");
     measurementsLayout->addWidget(me1);
     measurementsLayout->addWidget(this->status_measurements_startDate);
@@ -746,6 +926,18 @@ void MainWindow::createMenuBar() {
     this->menuFileImport->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_I));
     this->menuFile->addAction(this->menuFileImport);
 
+    this->menuFileLoadConfig = new QAction(tr("Load config file"), this->menuFile);
+    this->menuFileLoadConfig->setShortcut(QKeySequence(Qt::CTRL + Qt::ALT + Qt::Key_C));
+    this->menuFile->addAction(this->menuFileLoadConfig);
+
+    this->menuFileLoad = new QAction(tr("Load"), this->menuFile);
+    this->menuFileLoad->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_L));
+    this->menuFile->addAction(this->menuFileLoad);
+
+    this->menuFileSave = new QAction(tr("Save"), this->menuFile);
+    this->menuFileSave->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_S));
+    this->menuFile->addAction(this->menuFileSave);
+
     this->menuFileSettings = new QAction(tr("Settings"), this->menuFile);
     this->menuFile->addAction(this->menuFileSettings);
 
@@ -756,9 +948,13 @@ void MainWindow::connectUI() {
     connect(this->causesActionChoice, SIGNAL(currentIndexChanged(int)), SLOT(causesActionChanged(int)));
     connect(this->causesMineTimerangeChoice, SIGNAL(currentIndexChanged(int)), SLOT(causesTimerangeChanged()));
     connect(this->causesCompareTimerangeChoice, SIGNAL(currentIndexChanged(int)), SLOT(causesTimerangeChanged()));
+    connect(this->causesReloadButton, SIGNAL(pressed()), SLOT(causesTimerangeChanged()));
     connect(this->causesFilter, SIGNAL(textChanged(QString)), SLOT(causesFilterChanged(QString)));
 
     // Menus.
     connect(this->menuFileImport, SIGNAL(triggered()), SLOT(importFile()));
+    connect(this->menuFileLoadConfig, SIGNAL(triggered()), SLOT(loadConfigFile()));
+    connect(this->menuFileLoad, SIGNAL(triggered()), SLOT(loadFile()));
+    connect(this->menuFileSave, SIGNAL(triggered()), SLOT(saveFile()));
     connect(this->menuFileSettings, SIGNAL(triggered()), SLOT(settingsDialog()));
 }

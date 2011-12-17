@@ -17,6 +17,7 @@ namespace Analytics {
         qRegisterMetaType<Analytics::FrequentItemset>("FrequentItemset");
         qRegisterMetaType< QList<Analytics::Confidence> >("QList<Analytics::Confidence>");
         qRegisterMetaType< QList<Analytics::AssociationRule> >("QList<Analytics::AssociationRule>");
+        qRegisterMetaType<Analytics::ItemIDNameHash>("Analytics::ItemIDNameHash");
     }
 
     uint qHash(const AssociationRule & r) {
@@ -75,8 +76,6 @@ namespace Analytics {
     }
 
     QDebug operator<<(QDebug dbg, const FrequentItemset & frequentItemset) {
-        QString itemOutput;
-
         dbg.nospace() << "({";
         itemIDHelper(dbg, frequentItemset.itemset, frequentItemset.IDNameHash);
         dbg.nospace() << "}, sup: "

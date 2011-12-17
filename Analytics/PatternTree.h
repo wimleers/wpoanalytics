@@ -1,13 +1,34 @@
+/** 
+ * Copyright 2011 Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License. You may obtain
+ * a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */ 
+
+
 #ifndef PATTERNTREE_H
 #define PATTERNTREE_H
 
 #include <QDebug>
 #include <QMetaType>
+#include <QFile>
+#include <QTextStream>
 
 #include "Item.h"
 #include "TiltedTimeWindow.h"
 #include "FPNode.h"
 #include "Constraints.h"
+
+#include "qxtjson.h"
 
 
 namespace Analytics {
@@ -15,6 +36,20 @@ namespace Analytics {
     public:
         PatternTree();
         ~PatternTree();
+        void setTTWDefinition(const TTWDefinition & ttwDef) {
+            this->ttwDef = ttwDef;
+
+            // Update the root node with the TTW definition.
+            this->root->getPointerToValue()->build(this->ttwDef);
+        }
+        const TTWDefinition & getTTWDefinition() const { return this->ttwDef; }
+
+        bool serialize(QTextStream & output,
+                                   const ItemIDNameHash & itemIDNameHash) const;
+        bool deserialize(QTextStream & input,
+                                       const ItemIDNameHash * itemIDNameHash,
+                                       const ItemNameIDHash & itemNameIDHash,
+                                       quint32 updateID);
 
         // Accessors.
         FPNode<TiltedTimeWindow> * getRoot() const { return this->root; }
@@ -26,7 +61,9 @@ namespace Analytics {
                                                            uint from,
                                                            uint to,
                                                            const ItemIDList & prefix = ItemIDList(),
-                                                           FPNode<TiltedTimeWindow> * node = NULL) const;
+                                                           const FPNode<TiltedTimeWindow> * node = NULL) const;
+        SupportCount getTotalSupportForRange(const Constraints & c,
+                                             uint from, uint to) const;
 
         // Modifiers.
         void addPattern(const FrequentItemset & pattern, quint32 updateID);
@@ -37,6 +74,19 @@ namespace Analytics {
         static ItemIDList getPatternForNode(FPNode<TiltedTimeWindow> const * const node);
 
     protected:
+        // Static (class) methods.
+        static void recursiveSerializer(const FPNode<TiltedTimeWindow> * node,
+                                        const ItemIDNameHash & itemIDNameHash,
+                                        QTextStream & output,
+                                        QList<ItemName> pattern);
+        static bool totalSupportForRangeHelper(const Constraints & c,
+                                               uint from, uint to,
+                                               uint & totalSupport,
+                                               const ItemIDList & pattern,
+                                               const FPNode<TiltedTimeWindow> * node);
+
+
+        TTWDefinition ttwDef;
         FPNode<TiltedTimeWindow> * root;
         uint currentQuarter;
         unsigned int nodeCount;

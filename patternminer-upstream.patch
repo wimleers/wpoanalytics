@@ -1,0 +1,18 @@
+diff --git a/patternminer-building.pri b/patternminer-building.pri
+new file mode 100644
+index 0000000..9dde456
+--- /dev/null
++++ b/patternminer-building.pri
+@@ -0,0 +1,9 @@
++# Cleanup: filter to unique values.
++HEADERS = $$unique(HEADERS)
++DEFINES = $$unique(DEFINES)
++SOURCES = $$unique(SOURCES)
++INCLUDEPATH = $$unique(INCLUDEPATH)
++
++# Generic build settings.
++OBJECTS_DIR = .objects
++MOC_DIR = .moc
+diff --git a/shared/qxtcommandoptions.cpp b/shared/qxtcommandoptions.cpp
+new file mode 100644
+index 0000000..3f26a80

@@ -1,3 +1,20 @@
+/** 
+ * Copyright 2011 Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License. You may obtain
+ * a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */ 
+
+
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
@@ -29,6 +46,7 @@
 #include <QFileDialog>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QMessageBox>
 
 #include <QTableView>
 #include <QHeaderView>
@@ -41,10 +59,12 @@
 #include <QSettings>
 
 #include "ConceptHierarchyCompleter.h"
+#include "ConceptHierarchyModel.h"
 #include "CausesTableFilterProxyModel.h"
 #include "SettingsDialog.h"
 
-#include "../EpisodesParser/Parser.h"
+#include "../Config/Config.h"
+#include "../Parser/JSONLogParser.h"
 #include "../Analytics/Analyst.h"
 #include "../Analytics/TiltedTimeWindow.h"
 
@@ -68,6 +88,9 @@ signals:
     void mine(uint from, uint to);
     void mineAndCompare(uint fromOlder, uint toOlder, uint fromNewer, uint toNewer);
 
+    void load(QString file);
+    void save(QString file);
+
 public slots:
     // Parser.
     void wakeParser();
@@ -75,14 +98,16 @@ public slots:
     void updateParsingDuration(int duration);
 
     // Analyst: analyzing.
-    void updateAnalyzingStatus(bool analyzing, Time start, Time end, int numPageViews, int numTransactions);
-    void updateAnalyzingDuration(int duration);
-    void updateAnalyzingStats(Time start, Time end, int pageViews, int transactions, int uniqueItems, int frequentItems, int patternTreeSize);
+    void updateAnalyzingStatus(bool analyzing, Time start, Time end, quint64 numPageViews, quint64 numTransactions);
+    void updateAnalyzingStats(int duration, Time start, Time end, quint64 pageViews, quint64 transactions, quint64 uniqueItems, quint64 frequentItems, quint64 patternTreeSize);
 
     // Analyst: mining.
-    void updateMiningStatus(bool mining);
-    void updateMiningDuration(int duration);
-    void minedRules(uint from, uint to, QList<Analytics::AssociationRule> associationRules, Analytics::SupportCount eventsInTimeRange);
+    void updateRuleMiningStatus(bool mining);
+    void updateRuleMiningStats(int duration, Time start, Time end, quint64 numAssociationRules, quint64 numTransactions, quint64 numLines);
+    void minedRules(uint from, uint to,
+                    uint startTime, uint endTime,
+                    QList<Analytics::AssociationRule> associationRules,
+                    Analytics::SupportCount eventsInTimeRange);
     void comparedMinedRules(uint fromOlder, uint toOlder,
                             uint fromNewer, uint toNewer,
                             QList<Analytics::AssociationRule> intersectedRules,
@@ -91,6 +116,7 @@ public slots:
                             QList<Analytics::AssociationRule> comparedRules,
                             QList<Analytics::Confidence> confidenceVariance,
                             QList<float> supportVariance,
+                            QList<float> relativeSupport,
                             Analytics::SupportCount eventsInIntersectedTimeRange,
                             Analytics::SupportCount eventsInOlderTimeRange,
                             Analytics::SupportCount eventsInNewerTimeRange);
@@ -101,13 +127,20 @@ protected slots:
     void causesFilterChanged(QString filterString);
 
     void importFile();
+    void loadFile();
+    void saveFile();
+    void loadConfigFile();
     void settingsDialog();
+
+    void loadedFile(bool success, Time start, Time end, quint64 pageViews, quint64 transactions, quint64 uniqueItems, quint64 frequentItems, quint64 patternTreeSize);
+    void savedFile(bool);
 
 private:
     // Logic.
     void initLogic();
     void connectLogic();
     void assignLogicToThreads();
+    void applyConfigToAnalyst();
 
     // UI set-up.
     void initUI();
@@ -125,8 +158,10 @@ private:
     static QPair<uint, uint> mapTimerangeChoiceToBucket(int choice);
 
     // Logic.
-    EpisodesParser::Parser * parser;
+    Config::Config * config;
+    JSONLogParser::Parser * parser;
     Analytics::Analyst * analyst;
+    Analytics::TTWDefinition * ttwDef;
     QThread parserThread;
     QThread analystThread;
 
@@ -161,8 +196,10 @@ private:
     QComboBox * causesMineTimerangeChoice;
     QLabel * causesCompareLabel;
     QComboBox * causesCompareTimerangeChoice;
+    QPushButton * causesReloadButton;
     QLineEdit * causesFilter;
     ConceptHierarchyCompleter * causesFilterCompleter;
+    ConceptHierarchyModel * conceptHierarchyModel;
     QLabel * causesDescription;
     QTableView * causesTable;
     QStandardItemModel * causesTableModel;
@@ -184,6 +221,9 @@ private:
 
     // Menu bar.
     QMenu * menuFile;
+    QAction * menuFileLoadConfig;
+    QAction * menuFileLoad;
+    QAction * menuFileSave;
     QAction * menuFileImport;
     QAction * menuFileSettings;
 };

@@ -1,3 +1,20 @@
+/** 
+ * Copyright 2011 Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License. You may obtain
+ * a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */ 
+
+
 #include "FPStream.h"
 
 namespace Analytics {
@@ -5,7 +22,14 @@ namespace Analytics {
     //----------------------------------------------------------------------
     // Public methods.
 
-    FPStream::FPStream(double minSupport, double maxSupportError, ItemIDNameHash * itemIDNameHash, ItemNameIDHash * itemNameIDHash, ItemIDList * sortedFrequentItemIDs) {
+    FPStream::FPStream(const TTWDefinition & ttwDef,
+                       double minSupport,
+                       double maxSupportError,
+                       ItemIDNameHash * itemIDNameHash,
+                       ItemNameIDHash * itemNameIDHash,
+                       ItemIDList * sortedFrequentItemIDs)
+    {
+        this->ttwDef                = ttwDef;
         this->minSupport            = minSupport;
         this->maxSupportError       = maxSupportError;
         this->itemIDNameHash        = itemIDNameHash;
@@ -13,10 +37,122 @@ namespace Analytics {
         this->f_list                = sortedFrequentItemIDs;
         this->initialBatchProcessed = false;
 
+        this->transactionsPerBatch.build(this->ttwDef);
+        this->eventsPerBatch.build(this->ttwDef);
+        this->patternTree.setTTWDefinition(this->ttwDef);
+
         this->statusMutex.lock();
         this->processingBatch = false;
-        this->currentBatchID  = -1;
+        this->currentBatchID  = 0;
         this->statusMutex.unlock();
+    }
+
+    bool FPStream::serialize(QTextStream & output,
+                             uint startTime,
+                             uint endTime,
+                             uint initialStartTime) const
+    {
+        // Convert itemNameIDHash to a variant.
+        QVariantMap itemNameIDHashVariant;
+        foreach (ItemName itemName, this->itemNameIDHash->keys())
+            itemNameIDHashVariant.insert(itemName, (int) this->itemNameIDHash->value(itemName));
+
+        // Convert f_list to a variant.
+        QList<QVariant> f_listVariant;
+        foreach (const ItemID & itemID, *this->f_list)
+            f_listVariant << QVariant(this->itemIDNameHash->value(itemID));
+
+        QVariantMap json;
+        json.insert("v", 1);
+        // Bug in QxtJSON prevents uints from being stringified.
+        json.insert("start time of oldest batch", (int) startTime);
+        json.insert("end time of newest batch", (int) endTime);
+        json.insert("start time of first batch", (int) initialStartTime);
+        json.insert("current batch ID", (int) this->currentBatchID);
+        json.insert("transactions per batch", this->transactionsPerBatch.toVariantMap());
+        json.insert("events per batch", this->eventsPerBatch.toVariantMap());
+        json.insert("item name -> ID mapping", itemNameIDHashVariant);
+        json.insert("frequent items by descending frequency", f_listVariant);
+
+        output << QxtJSON::stringify(json) << "\n";
+
+        this->patternTree.serialize(output, *this->itemIDNameHash);
+
+        // TODO: add JSON conversion error checks.
+
+        return true;
+    }
+
+    bool FPStream::deserialize(QTextStream & input,
+                               uint & startTime,
+                               uint & endTime,
+                               uint & initialStartTime)
+    {
+        // All data specific to FPStream is on the first line.
+        QVariantMap json = QxtJSON::parse(input.readLine()).toMap();
+
+        int version = json["v"].toInt();
+        if (version == 1) {
+            // TODO: support loading of state without restarting
+            if (this->initialBatchProcessed || !this->itemIDNameHash->isEmpty() || this->patternTree.getNodeCount() > 0)
+                qCritical("Data structures not empty. Restart the app to load.");
+
+            bool success = true;
+
+            startTime        = json["start time of oldest batch"].toUInt();
+            endTime          = json["end time of newest batch"].toUInt();
+            initialStartTime = json["start time of first batch"].toUInt();
+            this->initialBatchProcessed = true;
+            this->currentBatchID = json["current batch ID"].toUInt();
+            // transactionsPerBatch and eventsPerBatch are now set *after*
+            // the PatternTree is deserialized, because the PatternTree contains
+            // the TTWDefinition that we also need to set for eventsPerBatch and
+            // transactionsPerBatch before we can set them.
+
+            QVariantMap itemNameIDHashVariant = json["item name -> ID mapping"].toMap();
+            ItemID itemID;
+            ItemName itemName;
+            foreach (const QString & key, itemNameIDHashVariant.keys()) {
+                itemName = (ItemName) key;
+                itemID = (ItemID) itemNameIDHashVariant[key].toUInt();
+                this->itemIDNameHash->insert(itemID, itemName);
+                this->itemNameIDHash->insert(itemName, itemID);
+            }
+
+            // f_list; but since it contains strings only (EpisodeNames), this
+            // also means we can (and *must*!) rebuild the item name -> id and
+            // vice versa hashes.
+            QList<QVariant> f_listValues = json["frequent items by descending frequency"].toList();
+            foreach (const QVariant & variant, f_listValues) {
+                itemName = (ItemName) variant.toString();
+                itemID = this->itemNameIDHash->value(itemName);
+
+                // Consider this item for use with constraints.
+                this->constraints.preprocessItem(itemName, itemID);
+                this->constraintsToPreprocess.preprocessItem(itemName, itemID);
+
+                this->f_list->append(itemID);
+            }
+
+            // All remaining data is for the PatternTree data structure.
+            if (!this->patternTree.deserialize(input, this->itemIDNameHash, *this->itemNameIDHash, this->currentBatchID))
+                return false;
+            // Update the TTWDefinition because it may have changed.
+            this->ttwDef = this->patternTree.getTTWDefinition();
+            this->eventsPerBatch.build(this->ttwDef, true);
+            this->transactionsPerBatch.build(this->ttwDef, true);
+
+            // Now that the TTWDefinition is deserialized, set eventsPerBatch
+            // and transactinsPerBatch.
+            success = success && this->transactionsPerBatch.fromVariantMap(json["transactions per batch"].toMap());
+            success = success && this->eventsPerBatch.fromVariantMap(json["events per batch"].toMap());
+            if (!success)
+                return false;
+        }
+
+        // TODO: add JSON conversion error checks.
+
+        return true;
     }
 
 
@@ -47,19 +183,30 @@ namespace Analytics {
      * @param transactionsPerEvent
      *   The number of transactions per event. Necessary to determine the
      *   correct minimum absolute support when a single event is expanded
-     *   into multiple transactions..
+     *   into multiple transactions.
+     * @param startNewTimeWindow
+     *   Whether to start a new time window (in each pattern's TiltedTimeWindow
+     *   object) or not. This will only true when entering a new time window,
+     *   i.e. not when the data for a time window is split in multiple batches,
+     *   to reduce memory consumption and improve performance.
+     * @param lastChunkOfBatch
+     *   Whether this is the last chunk of the batch of transactions for this
+     *   time window. (i.e. the next chunk will be for the batch of the next
+     *   time window.)
      */
-    void FPStream::processBatchTransactions(const QList<QStringList> & transactions, double transactionsPerEvent) {
+    void FPStream::processBatchTransactions(const QList<QStringList> & transactions, double transactionsPerEvent, bool startNewTimeWindow, bool lastChunkOfBatch) {
         this->statusMutex.lock();
         this->processingBatch = true;
-        this->currentBatchID++;
+        this->lastChunkOfBatch = lastChunkOfBatch;
+        if (startNewTimeWindow)
+            this->currentBatchID++;
         this->statusMutex.unlock();
 
         // Store the batch sizes. By storing it in a tilted time window, they
         // will automatically be summed in the same way as any other tilted
         // time window's support counts.
-        this->transactionsPerBatch.appendQuarter(transactions.size(), this->currentBatchID);
-        this->eventsPerBatch.appendQuarter(transactions.size() / transactionsPerEvent, this->currentBatchID);
+        this->transactionsPerBatch.append(transactions.size(), this->currentBatchID);
+        this->eventsPerBatch.append(transactions.size() / transactionsPerEvent, this->currentBatchID);
 
         // Mine the frequent itemsets in this batch.
         this->currentFPGrowth = new FPGrowth(transactions, (SupportCount) (this->maxSupportError * transactions.size() / transactionsPerEvent), this->itemIDNameHash, this->itemNameIDHash, this->f_list);
@@ -83,7 +230,7 @@ namespace Analytics {
             this->processingBatch = false;
             this->statusMutex.unlock();
 
-            emit batchProcessed();
+            emit chunkOfBatchProcessed();
         }
         // Subsequent batches.
         else {
@@ -96,7 +243,8 @@ namespace Analytics {
             // Keep track of the current quarter we're in, in case we're
             // starting a new TiltedTimeWindow (by adding a new pattern to the
             // PatternTree).
-            this->patternTree.nextQuarter();
+            if (startNewTimeWindow)
+                this->patternTree.nextQuarter();
 
             // Connect signals/slots using queued connections, because TODO.
             // TODO: make Qt::QueuedConnection actually work, by running
@@ -158,22 +306,36 @@ namespace Analytics {
             // Add the frequent itemset to the pattern tree.
             this->patternTree.addPattern(frequentItemset, this->currentBatchID);
 
-            // Conduct tail pruning.
+            // *Pretend* to conduct tail pruning.
+            // In this modified version of FP-Stream, we actually only really
+            // perform tail pruning when we're in the last chunk of the batch;
+            // in preceding chunks of the batch, we only *calculate* the part of
+            // the tail that can be dropped. We use this information instead of
+            // checking whether the TiltedTimeWindow is empty to decide whether
+            // the supersets should be calculated. This is not exactly the same
+            // as the original algorithm, but it's a close approximation that
+            // allows for parallellization and/or processing chunks of batches,
+            // thus allowing for more efficiency and/or less memory consumption.
             dropTailStartGranularity = FPStream::calculateDroppableTail(*tiltedTimeWindow, this->minSupport, this->maxSupportError, this->eventsPerBatch);
-            if (dropTailStartGranularity != (Granularity) -1)
-                tiltedTimeWindow->dropTail(dropTailStartGranularity);
+            if (dropTailStartGranularity != (Granularity) -1) {
+                this->statusMutex.lock();
+                bool lastChunkOfBatch = this->lastChunkOfBatch;
+                this->statusMutex.unlock();
+                if (lastChunkOfBatch)
+                    tiltedTimeWindow->dropTail(dropTailStartGranularity);
+            }
 
             // If the tilted time window is empty, then tell FP-Growth to
             // stop mining supersets of this frequent itemset (type II
             // pruning) by simply not asking it to continue to mine for
             // supersets.
             // Conversely, when the tilted time window is *not* empty, let
-            // FP-Growth now it should continue to mine supersets. But if
+            // FP-Growth know it should continue to mine supersets. But if
             // the received ctree (conditional tree) is NULL, then it was
             // determined through constraint search space matching that it
             // would be impossible to find frequent supersets that match the
             // constraints.
-            if (!tiltedTimeWindow->isEmpty() && ctree != NULL) {
+            if (dropTailStartGranularity != (Granularity) 0 && ctree != NULL) {
                 this->statusMutex.lock();
                 this->supersetsBeingCalculated.append(frequentItemset.itemset);
                 this->statusMutex.unlock();
@@ -261,10 +423,16 @@ namespace Analytics {
 #ifdef FPSTREAM_DEBUG
             qDebug() << "CLOOOOOOOOOOOOOOOOOOOOOSING UP!";
 #endif
-            // Since all frequent itemsets have been mined and processed, we
-            // should now update nodes in the pattern tree that remained
-            // unaffected during this batch.
-            this->updateUnaffectedNodes(this->patternTree.getRoot());
+
+            this->statusMutex.lock();
+            bool lastChunkOfBatch = this->lastChunkOfBatch;
+            this->statusMutex.unlock();
+            if (lastChunkOfBatch) {
+                // Since all frequent itemsets have been mined and processed, we
+                // should now update nodes in the pattern tree that remained
+                // unaffected during this batch.
+                this->updateUnaffectedNodes(this->patternTree.getRoot());
+            }
 
             // Now the processing of this batch is officially over.
             this->processingBatch = false;
@@ -280,7 +448,7 @@ namespace Analytics {
             qDebug() << "\tf_list size: " << this->f_list->size();
 #endif
 
-            emit batchProcessed();
+            emit chunkOfBatchProcessed();
         }
     }
 
@@ -295,12 +463,16 @@ namespace Analytics {
      *   -1 if nothing is droppable, a position in the [0, TTW_NUM_BUCKETS-1]
      *   range if a tail can be dropped.
      */
-    Granularity FPStream::calculateDroppableTail(const TiltedTimeWindow & window, double minSupport, double maxSupportError, const TiltedTimeWindow & batchSizes) {
-        Q_ASSERT(window.oldestBucketFilled <= batchSizes.oldestBucketFilled);
+    int FPStream::calculateDroppableTail(const TiltedTimeWindow & window, double minSupport, double maxSupportError, const TiltedTimeWindow & batchSizes) {
+        Q_ASSERT(window.getOldestBucketFilled() <= batchSizes.getOldestBucketFilled());
+
+        // If it's empty, there can't be anything worth calculating.
+        if (window.isEmpty())
+            return -1;
 
         // Iterate over all buckets in the tilted time window, starting at the
         // tail (i.e. the last/oldest bucket).
-        int n = window.oldestBucketFilled;
+        int n = window.getOldestBucketFilled();
         int l = -1, m = -1;
         SupportCount cumulativeSupport = 0, cumulativeBatchSize = 0;
         for (int i = n; i >= 0; i--) {
@@ -323,7 +495,7 @@ namespace Analytics {
 
         // If no such l is found, then there is no tail that can be dropped.
         if (l == -1)
-            return (Granularity) -1;
+            return -1;
 
         // Iterate again over all buckets in the tilted time window, starting
         // at the tail (i.e. the last/oldest bucket).
@@ -359,14 +531,10 @@ namespace Analytics {
         // m that can be dropped in its entirety (when m corresponds to the
         // first bucket of a granularity, it is of course *that* granularity
         // that can be dropped).
-        Granularity g;
-        if (m > -1) {
-            for (g = (Granularity) 0; g < (Granularity) TTW_NUM_GRANULARITIES; g = (Granularity) ((int) g + 1))
-                if ((uint) m <= TiltedTimeWindow::GranularityBucketOffset[g] && (uint) m < TiltedTimeWindow::GranularityBucketOffset[(Granularity) g + 1])
-                    return g;
-        }
+        if (m > -1)
+            return window.findLowestGranularityAfterBucket(m);
 
-        return (Granularity) -1;
+        return -1;
     }
 
 
@@ -392,7 +560,7 @@ namespace Analytics {
         //    timeslot).
         // AND perform tail pruning on its tilted time window; when it is
         //    empty after tail pruning and it is a leaf, drop it
-        // (i.e. only for itemsets where a 0 was inserted0
+        // (i.e. only for itemsets where a 0 was inserted)
 
         if (node == NULL)
             return;
@@ -410,7 +578,7 @@ namespace Analytics {
         // not updated during the current batch, then update it now.
         TiltedTimeWindow * tiltedTimeWindow = node->getPointerToValue();
         if (tiltedTimeWindow->getLastUpdate() != this->currentBatchID) {
-            tiltedTimeWindow->appendQuarter(0, this->currentBatchID);
+            tiltedTimeWindow->append(0, this->currentBatchID);
 
             // Conduct tail pruning.
             Granularity dropTailStartGranularity = FPStream::calculateDroppableTail(*tiltedTimeWindow, this->minSupport, this->maxSupportError, this->eventsPerBatch);

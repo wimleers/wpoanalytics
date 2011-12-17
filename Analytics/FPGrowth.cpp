@@ -218,7 +218,7 @@ namespace Analytics {
      * processed for use in constraints as well.
      */
     void FPGrowth::scanTransactions() {
-        // Consider items with item names that have been mapped to  item IDs
+        // Consider items with item names that have been mapped to item IDs
         // in previous executions of FPGrowth for use with constraints.
         if (!this->itemIDNameHash->isEmpty()) {
             foreach (ItemID itemID, this->itemIDNameHash->keys()) {
@@ -337,8 +337,7 @@ namespace Analytics {
         QSet<ItemID> frontItemIDs;
 
         // Determine which items should be at the front.
-        frontItemIDs.unite(this->constraintsForRuleConsequents.getItemIDsForConstraintType(CONSTRAINT_POSITIVE_MATCH_ANY));
-        frontItemIDs.unite(this->constraintsForRuleConsequents.getItemIDsForConstraintType(CONSTRAINT_POSITIVE_MATCH_ALL));
+        frontItemIDs.unite(this->constraintsForRuleConsequents.getAllItemIDsForConstraintType(ItemConstraintPositive));
 
         foreach (ItemID itemID, *(this->sortedFrequentItemIDs)) {
             item.id = itemID;
@@ -375,8 +374,7 @@ namespace Analytics {
         QSet<ItemID> frontItemIDs;
 
         // Determine which items should be at the front.
-        frontItemIDs.unite(this->constraintsForRuleConsequents.getItemIDsForConstraintType(CONSTRAINT_POSITIVE_MATCH_ANY));
-        frontItemIDs.unite(this->constraintsForRuleConsequents.getItemIDsForConstraintType(CONSTRAINT_POSITIVE_MATCH_ALL));
+        frontItemIDs.unite(this->constraintsForRuleConsequents.getAllItemIDsForConstraintType(ItemConstraintPositive));
 
         foreach (ItemID itemID, *(this->sortedFrequentItemIDs)) {
             if (itemset.contains(itemID)) {
@@ -443,6 +441,11 @@ namespace Analytics {
         bool frequentItemsetMatchesConstraints;
         QList<FrequentItemset> frequentItemsets;
         ItemIDList itemIDsInTree = ctree->getItemIDs();
+        static QSet<ConstraintClassification> constraintsSubset;
+
+        if (constraintsSubset.isEmpty()) {
+            constraintsSubset.insert(ConstraintClassificationMonotone);
+        }
 
         // Now iterate over each of the ordered suffix items and generate
         // candidate frequent itemsets!
@@ -461,18 +464,21 @@ namespace Analytics {
                 frequentItemset.IDNameHash = this->itemIDNameHash;
 #endif
 
+                // Check if there are supersets to be mined.
+                FPTree * cfptree = this->considerFrequentItemsupersets(ctree, frequentItemset.itemset);
+
                 // Only store the current frequent itemset if it matches the
-                // constraints.
-                frequentItemsetMatchesConstraints = this->constraints.matchItemset(frequentItemset.itemset);
-                if (!asynchronous && frequentItemsetMatchesConstraints) {
+                // constraints *OR* when its superset has the potential to match
+                // the constraints.
+                frequentItemsetMatchesConstraints = this->constraints.matchItemset(frequentItemset.itemset, constraintsSubset);
+                if (!asynchronous && (frequentItemsetMatchesConstraints || cfptree != NULL)) {
                     frequentItemsets.append(frequentItemset);
 #ifdef FPGROWTH_DEBUG
                 qDebug() << "\t\t\t\t new frequent itemset:" << frequentItemset;
 #endif
                 }
 
-                // Check if there are supersets to be mined.
-                FPTree * cfptree = this->considerFrequentItemsupersets(ctree, frequentItemset.itemset);
+                // If there are supersets to be mined, mine them.
                 if (cfptree != NULL && !asynchronous) {
                     // Attempt to generate more frequent itemsets, with the
                     // current frequent itemset as the suffix.

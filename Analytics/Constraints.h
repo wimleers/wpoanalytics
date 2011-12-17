@@ -1,22 +1,62 @@
+/** 
+ * Copyright 2011 Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License. You may obtain
+ * a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */ 
+
+
 #ifndef CONSTRAINTS_H
 #define CONSTRAINTS_H
 
 #include <QRegExp>
 #include <QList>
 #include <QSet>
-#include <QStringList>
+#include <QVector>
 
 #include "Item.h"
 
 
 namespace Analytics {
 
+#ifdef DEBUG
+//    #define CONSTRAINTS_DEBUG 0
+#endif
+
     enum ItemConstraintType {
-        CONSTRAINT_POSITIVE_MATCH_ALL,
-        CONSTRAINT_POSITIVE_MATCH_ANY,
-        CONSTRAINT_NEGATIVE_MATCH_ALL,
-        CONSTRAINT_NEGATIVE_MATCH_ANY
+        ItemConstraintPositive,
+        ItemConstraintNegative
     };
+
+    // TODO: not yet implemented.
+    enum LengthConstraintType {
+        LengthConstraintEquals,
+        LengthConstraintLessThan,
+        LengthConstraingGreaterThan
+    };
+
+    enum ConstraintClassification {
+        ConstraintClassificationAntimonotone,
+        ConstraintClassificationMonotone,
+        ConstraintClassificationSuccint,
+        ConcstraintClassificationConvertible
+    };
+
+    // For each constraint type (ItemConstraintType, key of QHash), we allow
+    // multiple entries (QVector), each of which is a set of items (QSet<ItemName>)
+    // that are OR'd together (positive: (a == x1 OR b == x1 OR ... OR n == x1);
+    // negative: !(a == x1 OR b == x1 OR ... OR n == x1)), while the entries
+    // (QVector) are AND'ed together.
+    typedef QHash<ItemConstraintType, QVector<QSet<ItemName> > > ItemConstraintsHash;
 
     class Constraints {
 
@@ -27,12 +67,13 @@ namespace Analytics {
     public:
         Constraints();
 
+        void reset();
         bool empty() const { return this->itemConstraints.empty(); }
 
-        void addItemConstraint(ItemName item, ItemConstraintType type);
-        void setItemConstraints(const QSet<ItemName> & constraints, ItemConstraintType type);
+        void addItemConstraint(const QSet<ItemName> & items, ItemConstraintType type);
+        void setItemConstraints(const ItemConstraintsHash & itemConstraints);
 
-        QSet<ItemID> getItemIDsForConstraintType(ItemConstraintType type) const;
+        QSet<ItemID> getAllItemIDsForConstraintType(ItemConstraintType type) const;
 
         void preprocessItemIDNameHash(const ItemIDNameHash & hash);
 
@@ -41,23 +82,33 @@ namespace Analytics {
         ItemID getHighestPreprocessedItemID() const { return this->highestPreprocessedItemID; }
         void clearPreprocessedItems() { this->preprocessedItemConstraints.clear(); this->highestPreprocessedItemID = ROOT_ITEMID; }
 
-        bool matchItemset(const ItemIDList & itemset) const;
+        bool matchItemset(const ItemIDList & itemset,
+                          const QSet<ConstraintClassification> & constraintsSubset = QSet<ConstraintClassification>()
+                          ) const;
+        bool matchItemset(const QSet<ItemName> & itemset,
+                          const QSet<ConstraintClassification> & constraintsSubset = QSet<ConstraintClassification>()
+                          ) const;
         bool matchSearchSpace(const ItemIDList & frequentItemset, const QHash<ItemID, SupportCount> & prefixPathsSupportCounts) const;
 
 #ifdef DEBUG
         ItemIDNameHash * itemIDNameHash;
 #endif
 
-        static const char * ItemConstraintTypeName[4];
+        static const char * ItemConstraintTypeName[2];
+        static const char * LengthConstraintTypeName[3];
+        static const ConstraintClassification ItemConstraintTypeClassification[2];
+        static const ConstraintClassification LengthConstraintTypeClassification[3];
 
     protected:
         static bool matchItemsetHelper(const ItemIDList & itemset, ItemConstraintType type, const QSet<ItemID> & constraintItems);
+        static bool matchItemsetHelper(const QSet<ItemName> & itemset, ItemConstraintType type, const QSet<ItemName> & constraintItems);
         static bool matchSearchSpaceHelper(const ItemIDList & frequentItemset, const QHash<ItemID, SupportCount> & prefixPathsSupportCounts, ItemConstraintType type, const QSet<ItemID> & constraintItems);
 
-        void addPreprocessedItemConstraint(ItemConstraintType type, const ItemName & category, ItemID id);
+        void updatePreprocesedItemConstraintsStructure();
+        void addPreprocessedItemConstraint(ItemConstraintType type, uint constraint, ItemID id);
 
-        QHash<ItemConstraintType, QSet<ItemName> > itemConstraints;
-        QHash<ItemConstraintType, QHash<ItemName, QSet<ItemID> > > preprocessedItemConstraints;
+        ItemConstraintsHash itemConstraints;
+        QHash<ItemConstraintType, QVector<QSet<ItemID> > > preprocessedItemConstraints;
         ItemID highestPreprocessedItemID;
     };
 }

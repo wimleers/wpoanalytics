@@ -1,3 +1,20 @@
+/** 
+ * Copyright 2011 Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License. You may obtain
+ * a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */ 
+
+
 #include "TestRuleMiner.h"
 
 void TestRuleMiner::basic() {
@@ -37,4 +54,46 @@ void TestRuleMiner::basic() {
     QCOMPARE(associationRules[0].confidence, (float) 0.8);
 
     delete fpgrowth;
+}
+
+void TestRuleMiner::generateCandidateItemsets() {
+    QList<ItemIDList> frequentItemsubsets, result;
+
+    // 1-item consequents.
+    frequentItemsubsets.clear();
+    frequentItemsubsets << (ItemIDList() << 1);
+    frequentItemsubsets << (ItemIDList() << 2);
+    frequentItemsubsets << (ItemIDList() << 3);
+    result = RuleMiner::generateCandidateItemsets(frequentItemsubsets);
+    QCOMPARE(result, QList<ItemIDList>() << (ItemIDList() << 1 << 2)
+                                         << (ItemIDList() << 1 << 3)
+                                         << (ItemIDList() << 2 << 3));
+
+    // 2-item consequents.
+    // It looks like (1,2,3) should be the result, but only (1,2) and (1,3)
+    // exist in the source: (2,3) does not exist, hence there are no results.
+    frequentItemsubsets.clear();
+    frequentItemsubsets << (ItemIDList() << 1 << 2);
+    frequentItemsubsets << (ItemIDList() << 3 << 2);
+    frequentItemsubsets << (ItemIDList() << 1 << 3);
+    result = RuleMiner::generateCandidateItemsets(frequentItemsubsets);
+    QCOMPARE(result, QList<ItemIDList>());
+    // Now (1,2,3) is the result.
+    frequentItemsubsets.clear();
+    frequentItemsubsets << (ItemIDList() << 1 << 2);
+    frequentItemsubsets << (ItemIDList() << 2 << 3);
+    frequentItemsubsets << (ItemIDList() << 1 << 3);
+    result = RuleMiner::generateCandidateItemsets(frequentItemsubsets);
+    QCOMPARE(result, QList<ItemIDList>() << (ItemIDList() << 1 << 2 << 3));
+    // Now both (1,2,3) and (1,2,4) are in the result.
+    frequentItemsubsets.clear();
+    frequentItemsubsets << (ItemIDList() << 1 << 2);
+    frequentItemsubsets << (ItemIDList() << 2 << 3);
+    frequentItemsubsets << (ItemIDList() << 1 << 3);
+    frequentItemsubsets << (ItemIDList() << 1 << 4);
+    frequentItemsubsets << (ItemIDList() << 2 << 4);
+    result = RuleMiner::generateCandidateItemsets(frequentItemsubsets);
+    QCOMPARE(result, QList<ItemIDList>() << (ItemIDList() << 1 << 2 << 3)
+                                         << (ItemIDList() << 1 << 2 << 4));
+    
 }
